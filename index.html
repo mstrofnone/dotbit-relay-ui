@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>relay.testls.bit — Namecoin .bit gated Nostr relay</title>
+<meta name="description" content="Browse events on relay.testls.bit, the Namecoin .bit-gated Nostr relay." />
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><text y='52' font-size='52'>🔐</text></svg>" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<header>
+  <div class="head-row">
+    <h1><span class="lock">🔐</span> relay.testls.bit</h1>
+    <div id="status" class="status">connecting…</div>
+  </div>
+  <p class="tag">Namecoin <code>.bit</code>-gated Nostr relay. Only events from pubkeys whose <code>kind:0</code> declares a <code>.bit</code> NIP-05 are accepted. <a href="https://github.com/vitorpamplona/amethyst/pull/2595" target="_blank" rel="noopener">amethyst PR&nbsp;#2595</a></p>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-kind="all">all</button>
+  <button class="tab" data-kind="0">profiles (kind&nbsp;0)</button>
+  <button class="tab" data-kind="1">notes (kind&nbsp;1)</button>
+  <button class="tab" data-kind="30023">long-form (kind&nbsp;30023)</button>
+  <button class="tab" data-kind="other">other</button>
+</nav>
+
+<main id="feed" class="feed" aria-live="polite"></main>
+
+<footer>
+  <p>
+    <a href="/?accept=nostr" id="nip11-link">NIP-11&nbsp;info</a>
+    · <code>wss://relay.testls.bit/</code>
+    · self-signed cert pinned via Namecoin TLSA
+  </p>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
