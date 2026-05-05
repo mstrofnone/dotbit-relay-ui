@@ -10,6 +10,7 @@ const FEED_LIMIT = 200;
 const PROFILE_LIMIT = 200;
 const AUTHOR_LIMIT = 500;
 const SEARCH_FETCH_MS = 4000;
+const EVENT_FETCH_MS = 4000;
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -29,11 +30,14 @@ function setStatus(text, cls = '') {
 const events = new Map();         // id -> event (global feed events)
 const profiles = new Map();       // pubkey -> parsed kind:0 metadata (+ created_at)
 const authorEvents = new Map();   // id -> event (currently-viewed author's events)
+const eventCache = new Map();     // id -> event (anything we've ever seen)
 let activeKindFilter = 'all';
 let renderQueued = false;
-let view = { kind: 'feed', pubkey: null }; // 'feed' | 'profile'
+let view = { kind: 'feed', pubkey: null, eventId: null }; // 'feed' | 'profile' | 'event'
 let activeAuthorSubId = null;
 let authorReqCounter = 0;
+let activeEventSubId = null;
+let eventReqCounter = 0;
 
 function queueRender() {
   if (renderQueued) return;
@@ -48,6 +52,38 @@ const URL_RE = /https?:\/\/[^\s<>"']+/g;
 const IMG_EXT = /\.(png|jpe?g|gif|webp|avif)(\?|#|$)/i;
 const VID_EXT = /\.(mp4|webm|mov)(\?|#|$)/i;
 const HEX64 = /^[0-9a-f]{64}$/i;
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true, () => fallbackCopy(text));
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+function fallbackCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch { return false; }
+}
+function flashCopied(el, label = 'copied!') {
+  if (!el) return;
+  const prev = el.dataset.flashPrev || el.textContent;
+  el.dataset.flashPrev = prev;
+  el.textContent = label;
+  el.classList.add('copied');
+  clearTimeout(el._flashTimer);
+  el._flashTimer = setTimeout(() => {
+    el.textContent = el.dataset.flashPrev;
+    el.classList.remove('copied');
+  }, 1100);
+}
 
 function escape(s) {
   return String(s)
@@ -182,6 +218,32 @@ function npubFromHex(hex) {
 function neventFromHex(hex) {
   return bech32Encode('nevent', tlv([[0, hexToBytes(hex)]]));
 }
+function noteFromHex(hex) {
+  return bech32Encode('note', hexToBytes(hex));
+}
+function eventIdFromAny(input) {
+  // Accepts: 64-char hex, note1..., nevent1...
+  const s = (input || '').trim();
+  if (HEX64.test(s)) return s.toLowerCase();
+  const dec = bech32Decode(s);
+  if (!dec) return null;
+  if (dec.hrp === 'note') {
+    return dec.bytes.length === 32 ? bytesToHex(dec.bytes) : null;
+  }
+  if (dec.hrp === 'nevent') {
+    const b = dec.bytes;
+    let off = 0;
+    while (off + 2 <= b.length) {
+      const t = b[off++], len = b[off++];
+      if (off + len > b.length) return null;
+      const val = b.slice(off, off + len);
+      off += len;
+      if (t === 0 && val.length === 32) return bytesToHex(val);
+    }
+    return null;
+  }
+  return null;
+}
 function pubkeyFromAny(input) {
   // Accepts: hex pubkey, npub1..., nprofile1...
   const s = input.trim();
@@ -237,6 +299,8 @@ function connect() {
     if (msg[0] === 'EVENT') {
       const subId = msg[1];
       const ev = msg[2];
+      // Always cache by id so /e/<id> can find it without refetching.
+      eventCache.set(ev.id, ev);
       if (subId === 'profiles' && ev.kind === 0) {
         try {
           const meta = JSON.parse(ev.content);
@@ -247,7 +311,6 @@ function connect() {
         } catch {}
         events.set(ev.id, ev);
       } else if (subId && subId.startsWith('author:')) {
-        // author view events
         if (ev.kind === 0) {
           try {
             const meta = JSON.parse(ev.content);
@@ -258,6 +321,17 @@ function connect() {
           } catch {}
         }
         if (subId === activeAuthorSubId) authorEvents.set(ev.id, ev);
+      } else if (subId && subId.startsWith('event:')) {
+        // single-event lookup; also harvest kind:0 if it's the author profile
+        if (ev.kind === 0) {
+          try {
+            const meta = JSON.parse(ev.content);
+            const prev = profiles.get(ev.pubkey);
+            if (!prev || prev.created_at < ev.created_at) {
+              profiles.set(ev.pubkey, { ...meta, created_at: ev.created_at });
+            }
+          } catch {}
+        }
       } else {
         events.set(ev.id, ev);
       }
@@ -265,6 +339,7 @@ function connect() {
     } else if (msg[0] === 'EOSE') {
       if (msg[1] === 'feed') queueRender();
       if (msg[1] === activeAuthorSubId) queueRender();
+      if (msg[1] === activeEventSubId) queueRender();
     } else if (msg[0] === 'NOTICE') {
       console.log('NOTICE:', msg[1]);
     } else if (msg[0] === 'CLOSED') {
@@ -285,33 +360,55 @@ function connect() {
 // ─── routing ───────────────────────────────────────────────────────────────
 function parseHash() {
   const h = location.hash || '';
+  let m;
   // #/p/<npub-or-hex>
-  const m = h.match(/^#\/p\/([a-z0-9]+)$/i);
-  if (m) {
+  if ((m = h.match(/^#\/p\/([a-z0-9]+)$/i))) {
     const pk = pubkeyFromAny(m[1]);
-    if (pk) return { kind: 'profile', pubkey: pk };
+    if (pk) return { kind: 'profile', pubkey: pk, eventId: null };
   }
-  return { kind: 'feed', pubkey: null };
+  // #/e/<nevent-note-or-hex>
+  if ((m = h.match(/^#\/e\/([a-z0-9]+)$/i))) {
+    const id = eventIdFromAny(m[1]);
+    if (id) return { kind: 'event', pubkey: null, eventId: id };
+  }
+  return { kind: 'feed', pubkey: null, eventId: null };
 }
 
 function gotoProfileByPubkey(pk) {
   const npub = npubFromHex(pk);
   location.hash = `#/p/${npub}`;
 }
+function gotoEventById(id) {
+  const nevent = neventFromHex(id);
+  location.hash = `#/e/${nevent}`;
+}
 function gotoFeed() {
   if (location.hash && location.hash !== '#/') location.hash = '#/';
   else applyRoute();
 }
 
+function tearDownAuthorSub() {
+  if (activeAuthorSubId) {
+    try { wsSend(['CLOSE', activeAuthorSubId]); } catch {}
+    activeAuthorSubId = null;
+  }
+  authorEvents.clear();
+}
+function tearDownEventSub() {
+  if (activeEventSubId) {
+    try { wsSend(['CLOSE', activeEventSubId]); } catch {}
+    activeEventSubId = null;
+  }
+}
+
 function applyRoute() {
   const next = parseHash();
-  // Tear down previous author sub if leaving profile or switching profile
+  // Tear down stale subs when leaving or switching
   if (view.kind === 'profile' && (next.kind !== 'profile' || next.pubkey !== view.pubkey)) {
-    if (activeAuthorSubId) {
-      try { wsSend(['CLOSE', activeAuthorSubId]); } catch {}
-      activeAuthorSubId = null;
-    }
-    authorEvents.clear();
+    tearDownAuthorSub();
+  }
+  if (view.kind === 'event' && (next.kind !== 'event' || next.eventId !== view.eventId)) {
+    tearDownEventSub();
   }
   view = next;
   if (view.kind === 'profile') {
@@ -319,6 +416,13 @@ function applyRoute() {
     feed.style.display = '';
     activeAuthorSubId = `author:${++authorReqCounter}`;
     wsSend(['REQ', activeAuthorSubId, { authors: [view.pubkey], limit: AUTHOR_LIMIT }]);
+  } else if (view.kind === 'event') {
+    profileView.hidden = true;
+    profileView.innerHTML = '';
+    if (!eventCache.has(view.eventId)) {
+      activeEventSubId = `event:${++eventReqCounter}`;
+      wsSend(['REQ', activeEventSubId, { ids: [view.eventId] }]);
+    }
   } else {
     profileView.hidden = true;
     profileView.innerHTML = '';
@@ -331,6 +435,7 @@ window.addEventListener('hashchange', applyRoute);
 // ─── render ────────────────────────────────────────────────────────────────
 function render() {
   if (view.kind === 'profile') renderProfileView();
+  else if (view.kind === 'event') renderEventView();
   else renderFeed();
 }
 
@@ -375,7 +480,18 @@ function renderProfileView() {
           ${website}
           <a href="https://njump.me/${npub}" target="_blank" rel="noopener">njump</a>
           <a href="https://nostr.com/${npub}" target="_blank" rel="noopener">nostr.com</a>
-          <span class="npub">${npub}</span>
+        </div>
+        <div class="ids">
+          <div class="id-row">
+            <span class="id-label">npub</span>
+            <code class="id-val">${npub}</code>
+            <button class="copy" type="button" data-copy="${npub}" title="copy npub">copy</button>
+          </div>
+          <div class="id-row">
+            <span class="id-label">hex</span>
+            <code class="id-val">${pk}</code>
+            <button class="copy" type="button" data-copy="${pk}" title="copy hex pubkey">copy</button>
+          </div>
         </div>
       </div>
       <button class="back" type="button" data-action="back">← back</button>
@@ -392,10 +508,44 @@ function renderProfileView() {
   feed.innerHTML = list.slice(0, 500).map(renderEvent).join('');
 }
 
-function renderEvent(ev) {
+function renderEventView() {
+  const id = view.eventId;
+  const ev = eventCache.get(id);
+  profileView.hidden = true;
+  profileView.innerHTML = '';
+  if (!ev) {
+    const nevent = neventFromHex(id);
+    const note = noteFromHex(id);
+    feed.innerHTML = `
+      <div class="event-detail-head">
+        <button class="back" type="button" data-action="back">← back</button>
+        <span class="detail-title">single event</span>
+      </div>
+      <div class="loading">Looking up event …<br><code>${shortId(id, 16)}</code></div>
+      <div class="ids">
+        <div class="id-row"><span class="id-label">nevent</span><code class="id-val">${nevent}</code><button class="copy" type="button" data-copy="${nevent}">copy</button></div>
+        <div class="id-row"><span class="id-label">note</span><code class="id-val">${note}</code><button class="copy" type="button" data-copy="${note}">copy</button></div>
+        <div class="id-row"><span class="id-label">hex</span><code class="id-val">${id}</code><button class="copy" type="button" data-copy="${id}">copy</button></div>
+      </div>`;
+    feed.querySelector('[data-action="back"]').addEventListener('click', gotoFeed);
+    return;
+  }
+  feed.innerHTML = `
+    <div class="event-detail-head">
+      <button class="back" type="button" data-action="back">← back</button>
+      <span class="detail-title">single event</span>
+    </div>
+    ${renderEvent(ev, { detail: true })}
+  `;
+  feed.querySelector('[data-action="back"]').addEventListener('click', gotoFeed);
+}
+
+function renderEvent(ev, opts = {}) {
+  const detail = !!opts.detail;
   const profile = profiles.get(ev.pubkey) || {};
   const npub = npubFromHex(ev.pubkey);
   const nevent = neventFromHex(ev.id);
+  const note = noteFromHex(ev.id);
   const name = profile.display_name || profile.name || shortId(npub, 14);
   const nip05 = profile.nip05
     ? `<button class="nip05" type="button" data-pubkey="${ev.pubkey}" title="open profile">@${escape(profile.nip05)}</button>`
@@ -432,19 +582,31 @@ function renderEvent(ev) {
     body = `<div class="evt-content"><code>${escape((ev.content || '').slice(0, 600))}</code></div>`;
   }
 
+  const dateLink = detail
+    ? `<span class="when">· ${fmtDate(ev.created_at)}</span>`
+    : `<button class="when" type="button" data-event="${ev.id}" title="open event">· ${fmtDate(ev.created_at)}</button>`;
+  const kindBadge = detail
+    ? `<span class="kind">kind&nbsp;${ev.kind}</span>`
+    : `<button class="kind kind-btn" type="button" data-event="${ev.id}" title="open event">kind&nbsp;${ev.kind}</button>`;
+
   return `
-    <article class="evt">
+    <article class="evt${detail ? ' evt-detail' : ''}">
       <div class="evt-head">
         <button class="who" type="button" data-pubkey="${ev.pubkey}" title="open profile">${avatar}${escape(name)}</button>
         ${nip05}
-        <span class="kind">kind&nbsp;${ev.kind}</span>
-        <span>· ${fmtDate(ev.created_at)}</span>
+        ${kindBadge}
+        ${dateLink}
       </div>
       ${body}
       <div class="evt-foot">
         <a href="https://njump.me/${nevent}" target="_blank" rel="noopener">njump</a>
         <a href="https://nostr.com/${npub}" target="_blank" rel="noopener">author</a>
-        <span class="id">${shortId(ev.id, 12)}</span>
+        ${detail ? '' : `<button class="open-event" type="button" data-event="${ev.id}" title="open event">open</button>`}
+      </div>
+      <div class="ids">
+        <div class="id-row"><span class="id-label">nevent</span><code class="id-val">${nevent}</code><button class="copy" type="button" data-copy="${nevent}" title="copy nevent">copy</button></div>
+        <div class="id-row"><span class="id-label">note</span><code class="id-val">${note}</code><button class="copy" type="button" data-copy="${note}" title="copy note id">copy</button></div>
+        <div class="id-row"><span class="id-label">hex</span><code class="id-val">${ev.id}</code><button class="copy" type="button" data-copy="${ev.id}" title="copy hex id">copy</button></div>
       </div>
     </article>
   `;
@@ -461,12 +623,32 @@ $$('.tab').forEach(btn => {
 
 // ─── delegated profile click handler ───────────────────────────────────────
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-pubkey]');
-  if (!t) return;
-  const pk = t.dataset.pubkey;
-  if (pk && HEX64.test(pk)) {
+  // copy buttons
+  const cb = e.target.closest('[data-copy]');
+  if (cb) {
     e.preventDefault();
-    gotoProfileByPubkey(pk);
+    const val = cb.dataset.copy;
+    if (val) copyToClipboard(val).then(() => flashCopied(cb));
+    return;
+  }
+  // event-detail navigation
+  const ev = e.target.closest('[data-event]');
+  if (ev) {
+    const id = ev.dataset.event;
+    if (id && HEX64.test(id)) {
+      e.preventDefault();
+      gotoEventById(id);
+      return;
+    }
+  }
+  // profile navigation
+  const pf = e.target.closest('[data-pubkey]');
+  if (pf) {
+    const pk = pf.dataset.pubkey;
+    if (pk && HEX64.test(pk)) {
+      e.preventDefault();
+      gotoProfileByPubkey(pk);
+    }
   }
 });
 
