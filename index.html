@@ -11,19 +11,25 @@
 <body>
 <header>
   <div class="head-row">
-    <h1><span class="lock">🔐</span> relay.testls.bit</h1>
+    <h1><a href="#/" class="home"><span class="lock">🔐</span> relay.testls.bit</a></h1>
     <div id="status" class="status">connecting…</div>
   </div>
-  <p class="tag">Namecoin <code>.bit</code>-gated Nostr relay. Only events from pubkeys whose <code>kind:0</code> declares a <code>.bit</code> NIP-05 are accepted. <a href="https://github.com/vitorpamplona/amethyst/pull/2595" target="_blank" rel="noopener">amethyst PR&nbsp;#2595</a></p>
+  <p class="tag">Namecoin <code>.bit</code>-gated Nostr relay. Every <code>kind:0</code> with a <code>.bit</code> NIP-05 is verified against the Namecoin blockchain via ElectrumX before the event is accepted &mdash; the on-chain pubkey must match <code>event.pubkey</code>. <a href="https://github.com/vitorpamplona/amethyst/pull/2595" target="_blank" rel="noopener">amethyst PR&nbsp;#2595</a> &middot; <a href="https://github.com/mstrofnone/strfry-namecoin-policy" target="_blank" rel="noopener">strfry-namecoin-policy</a></p>
+  <form id="search-form" class="search" role="search" autocomplete="off">
+    <input id="search-input" type="search" placeholder="find a .bit profile — name@host.bit, host.bit, npub1…, or hex pubkey" aria-label="search profiles" />
+    <button id="search-btn" type="submit">go</button>
+  </form>
 </header>
 
-<nav class="tabs">
+<nav class="tabs" id="tabs">
   <button class="tab active" data-kind="all">all</button>
   <button class="tab" data-kind="0">profiles (kind&nbsp;0)</button>
   <button class="tab" data-kind="1">notes (kind&nbsp;1)</button>
   <button class="tab" data-kind="30023">long-form (kind&nbsp;30023)</button>
   <button class="tab" data-kind="other">other</button>
 </nav>
+
+<section id="profile-view" class="profile-view" hidden></section>
 
 <main id="feed" class="feed" aria-live="polite"></main>
 

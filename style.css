@@ -33,6 +33,8 @@ header {
 }
 .head-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
 h1 { margin: 0; font-size: 1.5rem; }
+h1 .home { color: inherit; text-decoration: none; }
+h1 .home:hover { color: var(--accent); }
 .lock { font-size: 1.2em; }
 .tag { color: var(--muted); margin: 0.4rem 0 0; font-size: 0.92rem; }
 .tag a { color: var(--accent); text-decoration: none; }
@@ -40,6 +42,38 @@ h1 { margin: 0; font-size: 1.5rem; }
 .status { font-size: 0.85rem; color: var(--muted); }
 .status.ok { color: var(--good); }
 .status.err { color: var(--bad); }
+
+.search {
+  display: flex; gap: 0.4rem; margin-top: 0.8rem;
+}
+.search input {
+  flex: 1 1 auto;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  min-width: 0;
+}
+.search input:focus { outline: none; border-color: var(--accent); }
+.search button {
+  background: var(--accent);
+  color: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.45rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.search button:hover { filter: brightness(1.05); }
+.search-error {
+  color: var(--bad);
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0;
+  min-height: 1.2em;
+}
 
 .tabs {
   position: sticky; top: 0; z-index: 5;
@@ -79,11 +113,21 @@ h1 { margin: 0; font-size: 1.5rem; }
 .evt-head .who {
   display: flex; align-items: center; gap: 0.5rem;
   color: var(--fg); font-weight: 600;
+  background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; font-weight: 600;
+  cursor: pointer; text-align: left;
 }
+.evt-head .who:hover { color: var(--accent); }
 .evt-head .who img {
   width: 28px; height: 28px; border-radius: 50%; object-fit: cover; background: var(--bg);
 }
-.evt-head .nip05 { color: var(--accent); font-weight: 500; }
+.evt-head .nip05 {
+  color: var(--accent); font-weight: 500;
+  background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; font-weight: 500;
+  cursor: pointer;
+}
+.evt-head .nip05:hover { text-decoration: underline; }
 .evt-head .kind {
   font-size: 0.7rem; padding: 0.1rem 0.45rem; border: 1px solid var(--border); border-radius: 4px;
   font-family: ui-monospace, monospace;
@@ -106,6 +150,38 @@ h1 { margin: 0; font-size: 1.5rem; }
   text-align: center;
   padding: 3rem 1rem;
 }
+
+/* Profile view ───────────────────────────────────────────────── */
+.profile-view {
+  padding: 1rem max(1rem, calc((100vw - 800px) / 2)) 0;
+}
+.profile-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.profile-card .pic {
+  width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: var(--bg);
+  flex: 0 0 64px;
+}
+.profile-card .meta { flex: 1 1 auto; min-width: 0; }
+.profile-card .meta h2 { margin: 0 0 0.2rem; font-size: 1.2rem; }
+.profile-card .meta .nip05 { color: var(--accent); font-size: 0.9rem; }
+.profile-card .meta .about { margin-top: 0.4rem; color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+.profile-card .meta .about a { color: var(--accent); }
+.profile-card .meta .links { margin-top: 0.5rem; font-size: 0.85rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 0.7rem; }
+.profile-card .meta .links a { color: var(--muted); text-decoration: none; }
+.profile-card .meta .links a:hover { color: var(--accent); }
+.profile-card .meta .npub { font-family: ui-monospace, monospace; word-break: break-all; }
+.profile-card .back {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg); padding: 0.3rem 0.7rem; font: inherit; cursor: pointer;
+}
+.profile-card .back:hover { border-color: var(--accent); color: var(--accent); }
 
 a.event-link { color: var(--accent); }
 

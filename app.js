@@ -1,16 +1,24 @@
 // Tiny Nostr client for relay.testls.bit. No deps.
 //
 // Connects to wss://<this-host>/, subscribes to recent kind:0/1/30023,
-// renders a feed.
+// renders a feed. Click a profile to open a profile view that subscribes
+// to all events from that pubkey. Search bar resolves a `.bit` NIP-05
+// (or npub/hex) to a profile.
 
 const RELAY_URL = `wss://${location.host}/`;
 const FEED_LIMIT = 200;
 const PROFILE_LIMIT = 200;
+const AUTHOR_LIMIT = 500;
+const SEARCH_FETCH_MS = 4000;
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const status = $('#status');
 const feed = $('#feed');
+const profileView = $('#profile-view');
+const tabsEl = $('#tabs');
+const searchForm = $('#search-form');
+const searchInput = $('#search-input');
 
 function setStatus(text, cls = '') {
   status.textContent = text;
@@ -18,10 +26,14 @@ function setStatus(text, cls = '') {
 }
 
 // ─── state ─────────────────────────────────────────────────────────────────
-const events = new Map();      // id -> event
-const profiles = new Map();    // pubkey -> parsed kind:0 metadata
+const events = new Map();         // id -> event (global feed events)
+const profiles = new Map();       // pubkey -> parsed kind:0 metadata (+ created_at)
+const authorEvents = new Map();   // id -> event (currently-viewed author's events)
 let activeKindFilter = 'all';
 let renderQueued = false;
+let view = { kind: 'feed', pubkey: null }; // 'feed' | 'profile'
+let activeAuthorSubId = null;
+let authorReqCounter = 0;
 
 function queueRender() {
   if (renderQueued) return;
@@ -35,6 +47,7 @@ function shortId(s, n = 8) { return s.slice(0, n) + '…'; }
 const URL_RE = /https?:\/\/[^\s<>"']+/g;
 const IMG_EXT = /\.(png|jpe?g|gif|webp|avif)(\?|#|$)/i;
 const VID_EXT = /\.(mp4|webm|mov)(\?|#|$)/i;
+const HEX64 = /^[0-9a-f]{64}$/i;
 
 function escape(s) {
   return String(s)
@@ -62,22 +75,24 @@ function fmtDate(ts) {
   return d.toISOString().slice(0, 10);
 }
 
-// crockford-free, just-enough bech32 encoder for npub/nevent/naddr links via njump
-function npubFromHex(hex) {
-  return bech32Encode('npub', hexToBytes(hex));
-}
-function neventFromHex(hex) {
-  return bech32Encode('nevent', tlv([[0, hexToBytes(hex)]]));
-}
-
+// ─── bech32 (encode + decode) ──────────────────────────────────────────────
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const BECH32_INV = (() => {
+  const m = new Map();
+  for (let i = 0; i < BECH32_CHARSET.length; i++) m.set(BECH32_CHARSET[i], i);
+  return m;
+})();
+
 function hexToBytes(h) {
   const out = new Uint8Array(h.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
   return out;
 }
+function bytesToHex(b) {
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
 function tlv(entries) {
-  // Build TLV: [type, length, value...]
   let total = 0;
   for (const [, v] of entries) total += 2 + v.length;
   const out = new Uint8Array(total);
@@ -112,6 +127,9 @@ function bech32CreateChecksum(hrp, data) {
   for (let i = 0; i < 6; i++) out.push((polymod >> (5 * (5 - i))) & 31);
   return out;
 }
+function bech32VerifyChecksum(hrp, data) {
+  return bech32Polymod(bech32HrpExpand(hrp).concat(data)) === 1;
+}
 function convertBits(data, fromBits, toBits, pad) {
   let acc = 0, bits = 0;
   const out = [];
@@ -137,42 +155,116 @@ function bech32Encode(hrp, bytes) {
   const checksum = bech32CreateChecksum(hrp, data);
   return hrp + '1' + [...data, ...checksum].map(d => BECH32_CHARSET[d]).join('');
 }
+function bech32Decode(str) {
+  if (!str || typeof str !== 'string') return null;
+  const s = str.toLowerCase();
+  // basic format checks
+  if (/[A-Z]/.test(str) && /[a-z]/.test(str)) return null;
+  const sep = s.lastIndexOf('1');
+  if (sep < 1 || sep + 7 > s.length) return null;
+  const hrp = s.slice(0, sep);
+  const data = [];
+  for (let i = sep + 1; i < s.length; i++) {
+    const v = BECH32_INV.get(s[i]);
+    if (v === undefined) return null;
+    data.push(v);
+  }
+  if (!bech32VerifyChecksum(hrp, data)) return null;
+  const payload = data.slice(0, -6);
+  const bytes = convertBits(payload, 5, 8, false);
+  if (!bytes) return null;
+  return { hrp, bytes: new Uint8Array(bytes) };
+}
+
+function npubFromHex(hex) {
+  return bech32Encode('npub', hexToBytes(hex));
+}
+function neventFromHex(hex) {
+  return bech32Encode('nevent', tlv([[0, hexToBytes(hex)]]));
+}
+function pubkeyFromAny(input) {
+  // Accepts: hex pubkey, npub1..., nprofile1...
+  const s = input.trim();
+  if (HEX64.test(s)) return s.toLowerCase();
+  const dec = bech32Decode(s);
+  if (!dec) return null;
+  if (dec.hrp === 'npub') {
+    return dec.bytes.length === 32 ? bytesToHex(dec.bytes) : null;
+  }
+  if (dec.hrp === 'nprofile') {
+    // TLV; type 0 = pubkey
+    const b = dec.bytes;
+    let off = 0;
+    while (off + 2 <= b.length) {
+      const t = b[off++], len = b[off++];
+      if (off + len > b.length) return null;
+      const val = b.slice(off, off + len);
+      off += len;
+      if (t === 0 && val.length === 32) return bytesToHex(val);
+    }
+    return null;
+  }
+  return null;
+}
 
 // ─── relay connection ──────────────────────────────────────────────────────
 let ws;
+let wsReady = false;
+const pendingSends = [];
+
+function wsSend(payload) {
+  const msg = JSON.stringify(payload);
+  if (wsReady && ws.readyState === WebSocket.OPEN) ws.send(msg);
+  else pendingSends.push(msg);
+}
+
 function connect() {
   setStatus('connecting…');
   ws = new WebSocket(RELAY_URL);
   ws.onopen = () => {
+    wsReady = true;
     setStatus('connected', 'ok');
     // Profile sub: all kind:0
     ws.send(JSON.stringify(['REQ', 'profiles', { kinds: [0], limit: PROFILE_LIMIT }]));
     // Feed sub: kind:1 + kind:30023, recent
     ws.send(JSON.stringify(['REQ', 'feed', { kinds: [1, 30023], limit: FEED_LIMIT }]));
+    // flush queued sends (e.g. author sub from a deep link)
+    while (pendingSends.length) ws.send(pendingSends.shift());
   };
   ws.onmessage = (m) => {
     let msg;
     try { msg = JSON.parse(m.data); } catch { return; }
     if (msg[0] === 'EVENT') {
+      const subId = msg[1];
       const ev = msg[2];
-      if (msg[1] === 'profiles' && ev.kind === 0) {
+      if (subId === 'profiles' && ev.kind === 0) {
         try {
           const meta = JSON.parse(ev.content);
-          // keep newest kind:0 per pubkey
           const prev = profiles.get(ev.pubkey);
           if (!prev || prev.created_at < ev.created_at) {
             profiles.set(ev.pubkey, { ...meta, created_at: ev.created_at });
           }
         } catch {}
-        // also include in events if user picks "profiles" tab
         events.set(ev.id, ev);
+      } else if (subId && subId.startsWith('author:')) {
+        // author view events
+        if (ev.kind === 0) {
+          try {
+            const meta = JSON.parse(ev.content);
+            const prev = profiles.get(ev.pubkey);
+            if (!prev || prev.created_at < ev.created_at) {
+              profiles.set(ev.pubkey, { ...meta, created_at: ev.created_at });
+            }
+          } catch {}
+        }
+        if (subId === activeAuthorSubId) authorEvents.set(ev.id, ev);
       } else {
         events.set(ev.id, ev);
       }
       queueRender();
     } else if (msg[0] === 'EOSE') {
-      // End of stored events for this sub. After feed EOSE, hold a live sub.
       if (msg[1] === 'feed') queueRender();
+      if (msg[1] === activeAuthorSubId) queueRender();
     } else if (msg[0] === 'NOTICE') {
       console.log('NOTICE:', msg[1]);
     } else if (msg[0] === 'CLOSED') {
@@ -184,22 +276,74 @@ function connect() {
     setStatus('connection error', 'err');
   };
   ws.onclose = () => {
+    wsReady = false;
     setStatus('disconnected — retrying…', 'err');
     setTimeout(connect, 3000);
   };
 }
 
+// ─── routing ───────────────────────────────────────────────────────────────
+function parseHash() {
+  const h = location.hash || '';
+  // #/p/<npub-or-hex>
+  const m = h.match(/^#\/p\/([a-z0-9]+)$/i);
+  if (m) {
+    const pk = pubkeyFromAny(m[1]);
+    if (pk) return { kind: 'profile', pubkey: pk };
+  }
+  return { kind: 'feed', pubkey: null };
+}
+
+function gotoProfileByPubkey(pk) {
+  const npub = npubFromHex(pk);
+  location.hash = `#/p/${npub}`;
+}
+function gotoFeed() {
+  if (location.hash && location.hash !== '#/') location.hash = '#/';
+  else applyRoute();
+}
+
+function applyRoute() {
+  const next = parseHash();
+  // Tear down previous author sub if leaving profile or switching profile
+  if (view.kind === 'profile' && (next.kind !== 'profile' || next.pubkey !== view.pubkey)) {
+    if (activeAuthorSubId) {
+      try { wsSend(['CLOSE', activeAuthorSubId]); } catch {}
+      activeAuthorSubId = null;
+    }
+    authorEvents.clear();
+  }
+  view = next;
+  if (view.kind === 'profile') {
+    profileView.hidden = false;
+    feed.style.display = '';
+    activeAuthorSubId = `author:${++authorReqCounter}`;
+    wsSend(['REQ', activeAuthorSubId, { authors: [view.pubkey], limit: AUTHOR_LIMIT }]);
+  } else {
+    profileView.hidden = true;
+    profileView.innerHTML = '';
+  }
+  render();
+}
+
+window.addEventListener('hashchange', applyRoute);
+
 // ─── render ────────────────────────────────────────────────────────────────
 function render() {
+  if (view.kind === 'profile') renderProfileView();
+  else renderFeed();
+}
+
+function applyKindFilter(list) {
+  if (activeKindFilter === 'all') return list;
+  if (activeKindFilter === 'other') return list.filter(e => ![0, 1, 30023].includes(e.kind));
+  const k = parseInt(activeKindFilter, 10);
+  return list.filter(e => e.kind === k);
+}
+
+function renderFeed() {
   let list = [...events.values()].sort((a, b) => b.created_at - a.created_at);
-  if (activeKindFilter !== 'all') {
-    if (activeKindFilter === 'other') {
-      list = list.filter(e => ![0, 1, 30023].includes(e.kind));
-    } else {
-      const k = parseInt(activeKindFilter, 10);
-      list = list.filter(e => e.kind === k);
-    }
-  }
+  list = applyKindFilter(list);
   if (list.length === 0) {
     feed.innerHTML = `<div class="empty">No events yet.</div>`;
     return;
@@ -207,12 +351,55 @@ function render() {
   feed.innerHTML = list.slice(0, 300).map(renderEvent).join('');
 }
 
+function renderProfileView() {
+  const pk = view.pubkey;
+  const npub = npubFromHex(pk);
+  const profile = profiles.get(pk) || {};
+  const name = profile.display_name || profile.name || shortId(npub, 14);
+  const avatar = profile.picture
+    ? `<img class="pic" src="${escape(profile.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : `<div class="pic" aria-hidden="true"></div>`;
+  const nip05 = profile.nip05 ? `<div class="nip05">${escape(profile.nip05)}</div>` : '';
+  const about = profile.about ? `<div class="about">${linkify(profile.about)}</div>` : '';
+  const website = profile.website
+    ? `<a href="${escape(profile.website)}" target="_blank" rel="noopener">${escape(profile.website)}</a>` : '';
+
+  profileView.innerHTML = `
+    <div class="profile-card">
+      ${avatar}
+      <div class="meta">
+        <h2>${escape(name)}</h2>
+        ${nip05}
+        ${about}
+        <div class="links">
+          ${website}
+          <a href="https://njump.me/${npub}" target="_blank" rel="noopener">njump</a>
+          <a href="https://nostr.com/${npub}" target="_blank" rel="noopener">nostr.com</a>
+          <span class="npub">${npub}</span>
+        </div>
+      </div>
+      <button class="back" type="button" data-action="back">← back</button>
+    </div>
+  `;
+  profileView.querySelector('[data-action="back"]').addEventListener('click', gotoFeed);
+
+  let list = [...authorEvents.values()].sort((a, b) => b.created_at - a.created_at);
+  list = applyKindFilter(list);
+  if (list.length === 0) {
+    feed.innerHTML = `<div class="empty">No events from this profile yet.</div>`;
+    return;
+  }
+  feed.innerHTML = list.slice(0, 500).map(renderEvent).join('');
+}
+
 function renderEvent(ev) {
   const profile = profiles.get(ev.pubkey) || {};
   const npub = npubFromHex(ev.pubkey);
   const nevent = neventFromHex(ev.id);
   const name = profile.display_name || profile.name || shortId(npub, 14);
-  const nip05 = profile.nip05 ? `<span class="nip05">@${escape(profile.nip05)}</span>` : '';
+  const nip05 = profile.nip05
+    ? `<button class="nip05" type="button" data-pubkey="${ev.pubkey}" title="open profile">@${escape(profile.nip05)}</button>`
+    : '';
   const avatar = profile.picture
     ? `<img src="${escape(profile.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
     : '';
@@ -248,7 +435,7 @@ function renderEvent(ev) {
   return `
     <article class="evt">
       <div class="evt-head">
-        <span class="who">${avatar}${escape(name)}</span>
+        <button class="who" type="button" data-pubkey="${ev.pubkey}" title="open profile">${avatar}${escape(name)}</button>
         ${nip05}
         <span class="kind">kind&nbsp;${ev.kind}</span>
         <span>· ${fmtDate(ev.created_at)}</span>
@@ -272,6 +459,120 @@ $$('.tab').forEach(btn => {
   });
 });
 
+// ─── delegated profile click handler ───────────────────────────────────────
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-pubkey]');
+  if (!t) return;
+  const pk = t.dataset.pubkey;
+  if (pk && HEX64.test(pk)) {
+    e.preventDefault();
+    gotoProfileByPubkey(pk);
+  }
+});
+
+// ─── search ────────────────────────────────────────────────────────────────
+function findPubkeyByNip05(query) {
+  // case-insensitive substring match on profile.nip05
+  // exact match wins over partial; newest profile wins on ties
+  const q = query.toLowerCase();
+  let exact = null;
+  let partial = null;
+  for (const [pk, p] of profiles.entries()) {
+    if (!p || !p.nip05) continue;
+    const n = String(p.nip05).toLowerCase();
+    if (n === q || n === '_@' + q) {
+      if (!exact || (profiles.get(exact)?.created_at || 0) < p.created_at) exact = pk;
+    } else if (n.includes(q)) {
+      if (!partial || (profiles.get(partial)?.created_at || 0) < p.created_at) partial = pk;
+    }
+  }
+  return exact || partial;
+}
+
+function findPubkeyByName(query) {
+  const q = query.toLowerCase();
+  let best = null;
+  for (const [pk, p] of profiles.entries()) {
+    const names = [p?.name, p?.display_name].filter(Boolean).map(s => String(s).toLowerCase());
+    if (names.some(n => n === q)) {
+      if (!best || (profiles.get(best)?.created_at || 0) < p.created_at) best = pk;
+    }
+  }
+  return best;
+}
+
+function setSearchError(msg) {
+  let el = document.querySelector('.search-error');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'search-error';
+    searchForm.insertAdjacentElement('afterend', el);
+  }
+  el.textContent = msg || '';
+}
+
+async function resolveAndGo(raw) {
+  setSearchError('');
+  let q = (raw || '').trim();
+  if (!q) return;
+
+  // Strip leading @ if user typed "@alice@host.bit"
+  if (q.startsWith('@')) q = q.slice(1);
+
+  // 1. hex pubkey or npub/nprofile
+  const direct = pubkeyFromAny(q);
+  if (direct) { gotoProfileByPubkey(direct); return; }
+
+  // 2. NIP-05-ish: name@host.bit or just host.bit
+  const looksLikeNip05 = q.includes('.') || q.includes('@');
+  if (looksLikeNip05) {
+    // Normalize: bare "host.bit" is treated as "_@host.bit" in NIP-05 land
+    const candidates = [q.toLowerCase()];
+    if (!q.includes('@')) candidates.push('_@' + q.toLowerCase());
+
+    // Try local cache first
+    for (const cand of candidates) {
+      const pk = findPubkeyByNip05(cand);
+      if (pk) { gotoProfileByPubkey(pk); return; }
+    }
+
+    // Not in cache yet — refetch all kind:0 once and wait briefly
+    setSearchError('searching relay for ' + q + '…');
+    const before = profiles.size;
+    const subId = 'search:' + Date.now();
+    wsSend(['REQ', subId, { kinds: [0], limit: PROFILE_LIMIT }]);
+
+    const found = await new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        for (const cand of candidates) {
+          const pk = findPubkeyByNip05(cand);
+          if (pk) return resolve(pk);
+        }
+        if (Date.now() - start > SEARCH_FETCH_MS) return resolve(null);
+        setTimeout(tick, 150);
+      };
+      tick();
+    });
+    try { wsSend(['CLOSE', subId]); } catch {}
+
+    if (found) { setSearchError(''); gotoProfileByPubkey(found); return; }
+    setSearchError('No profile found for "' + q + '" on this relay. Only profiles whose kind:0 declares a verified .bit NIP-05 are stored here.');
+    return;
+  }
+
+  // 3. last resort: try name match
+  const byName = findPubkeyByName(q);
+  if (byName) { gotoProfileByPubkey(byName); return; }
+
+  setSearchError('Type a .bit NIP-05 (e.g. alice@testls.bit), an npub1…, or a 64-char hex pubkey.');
+}
+
+searchForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  resolveAndGo(searchInput.value);
+});
+
 // ─── nip-11 link ───────────────────────────────────────────────────────────
 $('#nip11-link').addEventListener('click', async (e) => {
   e.preventDefault();
@@ -287,3 +588,4 @@ $('#nip11-link').addEventListener('click', async (e) => {
 // ─── start ─────────────────────────────────────────────────────────────────
 feed.innerHTML = `<div class="loading">Connecting to ${RELAY_URL} …</div>`;
 connect();
+applyRoute();
