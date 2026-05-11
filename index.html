@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>relay.testls.bit — Namecoin .bit gated Nostr relay</title>
-<meta name="description" content="Browse events on relay.testls.bit, the Namecoin .bit-gated Nostr relay." />
+<title>relay.testls.bit — Namecoin .bit gated, NIP-9A rules-enforced Nostr relay</title>
+<meta name="description" content="Browse events on relay.testls.bit, the Namecoin .bit-gated Nostr relay with NIP-9A community rules enforcement (text-only baseline; file-type kinds whitelist-gated)." />
 <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><text y='52' font-size='52'>🔐</text></svg>" />
 <link rel="stylesheet" href="./style.css" />
 </head>
@@ -14,7 +14,7 @@
     <h1><a href="#/" class="home"><span class="lock">🔐</span> relay.testls.bit</a></h1>
     <div id="status" class="status">connecting…</div>
   </div>
-  <p class="tag">Namecoin <code>.bit</code>-gated Nostr relay. Every <code>kind:0</code> with a <code>.bit</code> NIP-05 is verified against the Namecoin blockchain via ElectrumX before the event is accepted &mdash; the on-chain pubkey must match <code>event.pubkey</code>. <a href="https://github.com/vitorpamplona/amethyst/pull/2595" target="_blank" rel="noopener">amethyst PR&nbsp;#2595</a> &middot; <a href="https://github.com/mstrofnone/strfry-namecoin-policy" target="_blank" rel="noopener">strfry-namecoin-policy</a></p>
+  <p class="tag">Namecoin <code>.bit</code>-gated Nostr relay. Every <code>kind:0</code> with a <code>.bit</code> NIP-05 is verified against the Namecoin blockchain via ElectrumX before the event is accepted &mdash; the on-chain pubkey must match <code>event.pubkey</code>. A signed <a href="https://github.com/nostr-protocol/nips/pull/2331" target="_blank" rel="noopener">NIP-9A</a> <code>kind:34551</code> rules document then gates <em>what</em> verified authors can publish: text kinds are open to all, file-type kinds and <code>kind:1</code> notes with <code>imeta</code> media tags are accepted only from a whitelist on the rules document. <a href="https://github.com/vitorpamplona/amethyst/pull/2595" target="_blank" rel="noopener">amethyst PR&nbsp;#2595</a> &middot; <a href="https://github.com/vitorpamplona/amethyst/pull/2758" target="_blank" rel="noopener">amethyst PR&nbsp;#2758</a> &middot; <a href="https://github.com/mstrofnone/strfry-namecoin-policy" target="_blank" rel="noopener">strfry-namecoin-policy</a></p>
   <form id="search-form" class="search" role="search" autocomplete="off">
     <input id="search-input" type="search" placeholder="find a .bit profile — name@host.bit, host.bit, npub1…, or hex pubkey" aria-label="search profiles" />
     <button id="search-btn" type="submit">go</button>
@@ -38,6 +38,7 @@
     <a href="/?accept=nostr" id="nip11-link">NIP-11&nbsp;info</a>
     · <code>wss://relay.testls.bit/</code>
     · self-signed cert pinned via Namecoin TLSA
+    · <a href="https://github.com/nostr-protocol/nips/pull/2331" target="_blank" rel="noopener">NIP-9A</a> rules enforced server-side and in <a href="https://github.com/vitorpamplona/amethyst" target="_blank" rel="noopener">Amethyst</a>
   </p>
 </footer>
 
