@@ -71,6 +71,39 @@ out of band.
 Native client support for `.bit` relay resolution exists in Amethyst
 behind <https://github.com/vitorpamplona/amethyst/pull/2595>.
 
+## NIP-9A community rules layer
+
+On top of the `.bit` author gate, the relay enforces a signed
+[NIP-9A](https://github.com/nostr-protocol/nips/pull/2331) `kind:34551`
+*Verifiable Community Rules* document. The rules document is published
+by the community owner and declares:
+
+- Which event kinds are accepted at all (text-only baseline by default:
+  `0`, `1`, `3`, `5`, `6`, `7`, `1111`, `9735`, `10002`).
+- Optional per-pubkey `allow` overrides — the **whitelist** for
+  file-type events (`1063`, `20`, `21`, `22`, `30023`, ...) and for
+  `kind:1` notes carrying `imeta` media tags.
+- Per-pubkey `deny` overrides (override any `allow`).
+- A global `max_event_size` cap and an anti-rollback `min_rules_created_at`
+  ratchet against stolen-key replay.
+
+The same rules document is consumed by the merged Quartz validator in
+[vitorpamplona/amethyst#2758](https://github.com/vitorpamplona/amethyst/pull/2758)
+and the composer-side validation in
+[vitorpamplona/amethyst#2798](https://github.com/vitorpamplona/amethyst/pull/2798),
+so Amethyst clients see the same verdict locally before the event is
+ever sent.
+
+Server-side enforcement is implemented in
+[`strfry-namecoin-policy` v0.3.0+](https://github.com/mstrofnone/strfry-namecoin-policy);
+the operator tooling for seeding/signing the rules document lives in
+[`nip9a-refimpl`](https://github.com/mstrofnone/nip9a-refimpl).
+
+This SPA serves the static landing page only — it does not enforce
+NIP-9A by itself, but it is hosted on the same vhost as the
+rules-enforced strfry, and the hero copy in `index.html` reflects the
+active policy.
+
 ## License
 
 MIT.
