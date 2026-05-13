@@ -71,10 +71,10 @@ out of band.
 Native client support for `.bit` relay resolution exists in Amethyst
 behind <https://github.com/vitorpamplona/amethyst/pull/2595>.
 
-## NIP-9A community rules layer
+## NIP-9B community rules layer
 
 On top of the `.bit` author gate, the relay enforces a signed
-[NIP-9A](https://github.com/nostr-protocol/nips/pull/2331) `kind:34551`
+[NIP-9B](https://github.com/nostr-protocol/nips/pull/2331) `kind:34551`
 *Verifiable Community Rules* document. The rules document is published
 by the community owner and declares:
 
@@ -100,7 +100,7 @@ the operator tooling for seeding/signing the rules document lives in
 [`nip9a-refimpl`](https://github.com/mstrofnone/nip9a-refimpl).
 
 This SPA serves the static landing page only — it does not enforce
-NIP-9A by itself, but it is hosted on the same vhost as the
+NIP-9B by itself, but it is hosted on the same vhost as the
 rules-enforced strfry, and the hero copy in `index.html` reflects the
 active policy.
 
